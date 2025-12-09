@@ -162,6 +162,7 @@ class HL7ViewerApp:
             
             # Text Widget
             self.text_input.configure(bg=field_bg, fg=fg_color, insertbackground=fg_color, selectbackground=select_bg)
+            self.text_input.tag_configure("highlight", background="#d4af37", foreground="black") # Metallic Gold for high contrast
             
             # Panes
             self.root.configure(bg=bg_color)
@@ -203,6 +204,7 @@ class HL7ViewerApp:
 
             # Text Widget
             self.text_input.configure(bg="#ffffff", fg="black", insertbackground="black", selectbackground=select_bg)
+            self.text_input.tag_configure("highlight", background="#ffff00", foreground="black") # Bright Yellow highlight
             
             # Panes
             self.root.configure(bg=bg_color)
@@ -219,9 +221,10 @@ class HL7ViewerApp:
             data = self.root.clipboard_get()
             self.text_input.configure(state='normal')
             self.text_input.delete("1.0", tk.END)
-            self.text_input.insert("1.0", data)
+            # Normalize to ensure one segment per line
+            norm_data = data.replace('\r\n', '\n').replace('\r', '\n')
+            self.text_input.insert("1.0", norm_data)
             self.text_input.configure(state='disabled')
-            # Auto-parse on paste?
             self.parse_message()
         except tk.TclError:
             pass # Clipboard empty or not text
@@ -268,12 +271,14 @@ class HL7ViewerApp:
         if not raw_text:
             return
 
-        # Normalize logic
-        raw_text = raw_text.replace('\r\n', '\r').replace('\n', '\r')
-        segments = raw_text.split('\r')
+        # Text is already normalized by paste, split by \n
+        segments = raw_text.split('\n')
 
         for i, segment_str in enumerate(segments):
             if not segment_str.strip():
+                # Keep empty line in segments list to match text lines? 
+                # Yes, to keep index sync with Text widget line numbers
+                self.parsed_segments.append({'name': '', 'raw': '', 'fields': []})
                 continue
             
             parts = segment_str.split('|')
@@ -282,15 +287,8 @@ class HL7ViewerApp:
             # Construct standard fields list
             # Handle MSH special case: Field 1 is '|', Field 2 is '^~\&'
             if seg_name == 'MSH':
-                # MSH|^~\&|...
-                # parts[0] = MSH
-                # parts[1] = ^~\& (This is technically MSH.2)
-                # MSH.1 is the separator '|'
                 fields = ['|'] + parts[1:] # Shift everything by 1, and insert separator as first field
             else:
-                # Ordinary segment: PID|1|...
-                # parts[0] = PID
-                # parts[1] = Field 1
                 fields = parts[1:]
 
             self.parsed_segments.append({
@@ -313,6 +311,9 @@ class HL7ViewerApp:
             self.field_tree.delete(item)
         for item in self.comp_tree.get_children(): 
             self.comp_tree.delete(item)
+            
+        # Remove any highlights
+        self.text_input.tag_remove("highlight", "1.0", tk.END)
 
         idx = int(selected_items[0]) # The IID is the index
         if idx >= len(self.parsed_segments): 
@@ -331,6 +332,78 @@ class HL7ViewerApp:
             # iid = "segIdx_fieldIdx"
             tag = 'odd' if i % 2 else 'even'
             self.field_tree.insert("", tk.END, iid=f"{idx}_{i}", values=(field_idx, desc, val), tags=(tag,))
+            
+    def highlight_field(self, seg_idx, field_idx):
+        # 1. Clean old highlights
+        self.text_input.tag_remove("highlight", "1.0", tk.END)
+        
+        # 2. Identify Line
+        line_num = seg_idx + 1
+        
+        # 3. Get raw text of that line
+        line_text = self.text_input.get(f"{line_num}.0", f"{line_num}.end")
+        
+        # 4. Find pipes
+        pipes = [pos for pos, char in enumerate(line_text) if char == '|']
+        val = self.parsed_segments[seg_idx]['fields'][field_idx]
+        
+        start_pos = -1
+        end_pos = -1
+        
+        seg_name = self.parsed_segments[seg_idx]['name']
+        
+        if seg_name == 'MSH':
+            # MSH Field 1 (idx 0) is the first pipe '|'
+            # MSH Field 2 (idx 1) is contents between pipe 0 and pipe 1
+            # MSH Field 3 (idx 2) is contents between pipe 1 and pipe 2
+            
+            if field_idx == 0:
+                # Field 1: The separator itself
+                if len(pipes) > 0:
+                    start_pos = pipes[0]
+                    end_pos = pipes[0] + 1
+            elif field_idx == 1:
+                # Field 2: Encoding chars
+                if len(pipes) > 0: # Need at least first pipe
+                    start_pos = pipes[0] + 1
+                    if len(pipes) > 1:
+                        end_pos = pipes[1]
+                    else:
+                        end_pos = len(line_text)
+            else:
+                # Field k (idx k) -> between pipe (k-1) and pipe k
+                p_start_idx = field_idx - 1
+                p_end_idx = field_idx
+                
+                if p_start_idx < len(pipes):
+                    start_pos = pipes[p_start_idx] + 1
+                    if p_end_idx < len(pipes):
+                        end_pos = pipes[p_end_idx]
+                    else:
+                        end_pos = len(line_text)
+
+        else:
+            # Standard: Segment|F1|F2|...
+            # Field 1 (idx 0) -> between pipe 0 and pipe 1
+            # Field k (idx k) -> between pipe k and pipe k+1
+            
+            if not pipes: return 
+            
+            p_start_idx = field_idx
+            p_end_idx = field_idx + 1
+            
+            if p_start_idx < len(pipes):
+                start_pos = pipes[p_start_idx] + 1
+                
+                if p_end_idx < len(pipes):
+                    end_pos = pipes[p_end_idx]
+                else:
+                    end_pos = len(line_text)
+        
+        # Apply highlight if valid positions found
+        if start_pos != -1 and end_pos != -1:
+            self.text_input.tag_add("highlight", f"{line_num}.{start_pos}", f"{line_num}.{end_pos}")
+            self.text_input.see(f"{line_num}.{start_pos}") # Scroll to view
 
     def on_field_select(self, event):
         selected_items = self.field_tree.selection()
@@ -343,6 +416,9 @@ class HL7ViewerApp:
         # iid format: "segIdx_fieldIdx"
         iid = selected_items[0]
         seg_idx, field_idx_0 = map(int, iid.split('_'))
+        
+        # Highlight in raw text
+        self.highlight_field(seg_idx, field_idx_0)
         
         val = self.parsed_segments[seg_idx]['fields'][field_idx_0]
         
