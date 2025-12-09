@@ -18,3 +18,7 @@ error.log
 check_env.py
 env_output.txt
 env_output_full.txt
+
+# PyInstaller
+build/
+*.spec
